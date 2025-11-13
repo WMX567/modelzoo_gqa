@@ -289,6 +289,9 @@ class GPT2LMHeadModelConfig(ModelConfig):
     output_layer_initializer: Optional[InitializerConfig] = None
     "The name of the initializer for the weights of the output layer."
 
+    attention_q_initializer: Optional[InitializerConfig] = None
+    "The name of the initializer for the weights of the attention Q projection."
+
     ffn_initializer: Optional[InitializerConfig] = None
     "The name of the initializer for the weights of the ffn kernel."
 
@@ -420,6 +423,9 @@ class GPT2LMHeadModelConfig(ModelConfig):
 
     dtype: Union[torch.dtype, str, None] = None
     "The embedding dtype"
+
+    depth_scaling_factor: float = 1.0
+    "Depth scaling factor applied to residual connections in TransformerDecoderLayer."
 
     @model_validator(mode="after")
     def validate_rotary_dim(self):
@@ -578,8 +584,14 @@ class GPT2LMHeadModelConfig(ModelConfig):
                     "*decoder*linear*expert_weights",  # moe
                 ]
             ),
-            "decoder_attention": LRAdjustmentGroup(
-                "*decoder*attn*dense*weight"
+            "q_decoder_attention": LRAdjustmentGroup(
+                "*decoder*attn*q_dense*weight"
+            ),
+            "k_decoder_attention": LRAdjustmentGroup(
+                "*decoder*attn*k_dense*weight"
+            ),
+            "v_decoder_attention": LRAdjustmentGroup(
+                "*decoder*attn*v_dense*weight"
             ),
             "decoder_input_ffn": LRAdjustmentGroup(
                 [
@@ -630,6 +642,9 @@ class GPT2LMHeadModel(nn.Module):
         norm_type = config.norm_type
         layer_norm_epsilon = config.layer_norm_epsilon
         num_heads = config.num_heads
+        num_kv_groups = config.extra_attention_params.get(
+            "num_kv_groups", 1
+        )
         attention_type = config.attention_type
         attention_module = config.attention_module
         attention_sliding_window_length = config.attention_sliding_window_length
@@ -688,6 +703,7 @@ class GPT2LMHeadModel(nn.Module):
         final_logit_softcapping = config.final_logit_softcapping
         moe_params = config.moe_params
         dtype = config.dtype
+        depth_scaling_factor = config.depth_scaling_factor
         use_experimental_flex_api = config.use_experimental_flex_api
 
         # std deviation for weight initialization
@@ -713,6 +729,7 @@ class GPT2LMHeadModel(nn.Module):
         )
         if initializer is None:
             attention_initializer = default_initializer
+            attention_q_initializer = default_initializer
             if ffn_initializer is None:
                 ffn_initializer = default_initializer
             if moe_params.gate_initializer is None:
@@ -721,6 +738,7 @@ class GPT2LMHeadModel(nn.Module):
                 gate_initializer = moe_params.gate_initializer
         else:
             attention_initializer = initializer
+            attention_q_initializer = initializer
             if ffn_initializer is None:
                 ffn_initializer = initializer
             gate_initializer = initializer
@@ -738,9 +756,10 @@ class GPT2LMHeadModel(nn.Module):
         self.output_logits_scale = output_logits_scale
         if mup_base_hidden_size:
             hidden_size_width_mult = hidden_size / mup_base_hidden_size
-            attention_initializer, ffn_initializer = (
+
+            attention_q_initializer, ffn_initializer, attention_initializer = (
                 scale_initializers_by_dimension(
-                    [attention_initializer, ffn_initializer],
+                    [attention_q_initializer, ffn_initializer, attention_initializer],
                     width_scale=hidden_size_width_mult**-0.5,
                 )
             )
@@ -763,11 +782,19 @@ class GPT2LMHeadModel(nn.Module):
                     output_logits_alpha / hidden_size_width_mult**0.5
                 )
             for lr_adjustment_group in [
-                "decoder_attention",
+                "q_decoder_attention",
                 "decoder_input_ffn",
             ]:
                 lr_adjustment_groups[lr_adjustment_group].set_scale(
                     1 / hidden_size_width_mult
+                )
+
+            for lr_adjustment_group in [
+                "k_decoder_attention",
+                "v_decoder_attention",
+            ]:
+                lr_adjustment_groups[lr_adjustment_group].set_scale(
+                    (1 + num_kv_groups**(1/2)) / 2 * hidden_size_width_mult
                 )
 
         if mup_base_filter_size:
@@ -877,6 +904,7 @@ class GPT2LMHeadModel(nn.Module):
             use_projection_bias_in_attention=use_projection_bias_in_attention,
             use_ffn_bias_in_attention=use_ffn_bias_in_attention,
             use_ffn_bias=use_ffn_bias,
+            attention_q_initializer=attention_q_initializer,
             attention_initializer=attention_initializer,
             attention_output_layer_initializer=output_layer_initializer,
             attention_logit_softcapping=attention_logit_softcapping,
@@ -886,6 +914,7 @@ class GPT2LMHeadModel(nn.Module):
             norm_first_sandwich=norm_first_sandwich,
             moe_params=moe_params,
             memory_tokens_config=memory_tokens_config,
+            depth_scaling_factor=depth_scaling_factor,
         )
 
         # Final LayerNorm
@@ -920,6 +949,7 @@ class GPT2LMHeadModel(nn.Module):
                 use_projection_bias_in_attention=use_projection_bias_in_attention,
                 use_ffn_bias_in_attention=use_ffn_bias_in_attention,
                 use_ffn_bias=use_ffn_bias,
+                attention_q_initializer=attention_q_initializer,
                 attention_initializer=attention_initializer,
                 attention_output_layer_initializer=output_layer_initializer,
                 attention_logit_softcapping=attention_logit_softcapping,
@@ -991,6 +1021,16 @@ class GPT2LMHeadModel(nn.Module):
         self.tie_weights()
 
         self.__reset_parameters()
+
+        # Print number of embedding and unembedding parameters from the model
+        embedding_params = [p for p in self.embedding_layer.parameters()] + [p for p in self.lm_head.parameters()]
+        non_embedding_params = [p for p in self.transformer_decoder.parameters()]
+        logging.info(
+            f"Embedding params: {sum(p.numel() for p in embedding_params):,} "
+            f"Non-Embedding params: {sum(p.numel() for p in non_embedding_params):,} "
+            f"Total model params: {sum(p.numel() for p in self.parameters()):,}"
+        )
+
 
     def reset_parameters(self):
         self.embedding_layer.reset_parameters()
