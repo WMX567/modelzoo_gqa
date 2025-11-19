@@ -496,9 +496,9 @@ class MuPVerifier:
         print(f"Success rate: {total_passed/total_checks*100:.1f}%")
         
         if total_passed == total_checks:
-            print("\n🎉 ALL CHECKS PASSED! muP implementation is correct!")
+            print("ALL CHECKS PASSED! muP implementation is correct!")
         else:
-            print(f"\n⚠️  {total_checks - total_passed} checks failed. Please review the implementation.")
+            print(f"{total_checks - total_passed} checks failed. Please review the implementation.")
         
         print("=" * 100)
     
@@ -619,5 +619,4 @@ if __name__ == "__main__":
             num_kv_groups=args.num_kv_groups,
             num_layers=args.num_layers,
         )
-        
         verifier.run_verification()
