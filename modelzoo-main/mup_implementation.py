@@ -50,14 +50,9 @@ import logging
 
 from cerebras.modelzoo.models.nlp.gpt2.gpt2_model import (
     GPT2LMHeadModelConfig,
-    GPT2LMHeadModel,
 )
 from cerebras.modelzoo.common.utils.model.mup_utils import (
     LRAdjustmentGroup,
-    scale_initializers_by_dimension,
-)
-from cerebras.modelzoo.common.utils.model.transformer_utils import (
-    create_initializer,
 )
 
 
