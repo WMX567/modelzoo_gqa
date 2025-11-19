@@ -15,7 +15,6 @@
 import logging
 from dataclasses import asdict, is_dataclass
 from typing import List, Optional, Union
-
 import torch
 
 from cerebras.modelzoo.config import BaseConfig
